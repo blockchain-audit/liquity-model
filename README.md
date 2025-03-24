@@ -53,13 +53,13 @@ pip install -r requirements.txt
 
 ```bash
 # Run the simple simulation
-python -m model.sim.simple_simulation
+python -m sim/simple_simulation.py
 
 # Run the full simulation with different scenarios
-python -m model.sim.simulation_example
+python -m sim/simulation_example.py
 
 # Run the visualization simulation (requires matplotlib)
-python -m model.sim.visualization_simulation
+python -m sim/visualization_simulation.py
 ```
 
 3. Import the model in your own scripts:

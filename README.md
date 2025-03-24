@@ -1,6 +1,8 @@
 # Bold Protocol Economic Model
 
-This folder contains a simplified Python economic model of the Bold Protocol, a multi-collateral stablecoin system. The model simulates the core components of the protocol including troves (vaults), stability pool, liquidations, redemptions, and interest accrual.
+This folder contains a comprehensive Python economic model of the Bold Protocol, a multi-collateral stablecoin system. The model simulates the core components of the protocol including troves (vaults), stability pool, liquidations, redemptions, and interest accrual.
+
+The model is extensively documented with detailed explanations of economic concepts and mechanisms based on the Liquity whitepaper, making it easy for developers and economists to understand the protocol's design and behavior even without prior knowledge of DeFi lending protocols.
 
 ## Overview
 
@@ -102,6 +104,9 @@ python -m unittest test.test_vault_model
 - **Stability Pool**: Deposits, withdrawals, and liquidation handling
 - **Redemptions**: Converting BOLD back to collateral
 - **Visualizations**: Charts showing system state over time
+- **Thorough Documentation**: Detailed explanations of core protocol concepts
+- **Economic Mechanism Explanations**: Each function is documented with its economic purpose and how it contributes to protocol stability
+- **User-Centric Documentation**: Explains why users would call different functions and their expected outcomes
 
 ## Limitations
 

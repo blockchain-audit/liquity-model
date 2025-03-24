@@ -3,6 +3,19 @@ Trove Manager Model for Bold Protocol.
 
 This module simulates the TroveManager contract which handles the core logic for
 troves including liquidations, redemptions, and interest accrual.
+
+The TroveManager is a central component of the Bold Protocol, responsible for:
+1. Managing the lifecycle of troves (creation, modification, closure)
+2. Enforcing collateralization requirements
+3. Handling liquidations of undercollateralized troves
+4. Processing redemptions of BOLD for collateral
+5. Calculating and applying interest to troves
+6. Managing batch operations for improved capital efficiency
+7. Coordinating redistribution of collateral and debt during liquidations
+
+These operations work together to maintain the stability of the Bold stablecoin
+and ensure the protocol can withstand market volatility while providing
+capital-efficient borrowing options to users.
 """
 
 import math
@@ -13,141 +26,273 @@ from typing import Dict, List, Optional
 
 # Trove status enum
 class Status(Enum):
-    NON_EXISTENT = 0
-    ACTIVE = 1
-    CLOSED_BY_OWNER = 2
-    CLOSED_BY_LIQUIDATION = 3
-    CLOSED_BY_REDEMPTION = 4
-    ZOMBIE = 5  # When debt is below minimum after a partial redemption
+    """
+    Represents the possible states of a trove in the Bold Protocol.
+    
+    A trove's status determines what operations can be performed on it and how
+    it's treated by the system. This is essential for tracking the lifecycle
+    of borrower positions.
+    """
+    NON_EXISTENT = 0  # Trove has not been created or has been fully closed
+    ACTIVE = 1        # Normal active trove with debt and collateral
+    CLOSED_BY_OWNER = 2  # Trove was voluntarily closed by its owner
+    CLOSED_BY_LIQUIDATION = 3  # Trove was liquidated due to insufficient collateral
+    CLOSED_BY_REDEMPTION = 4  # Trove was closed through BOLD redemption
+    ZOMBIE = 5  # Trove with debt below minimum after a partial redemption
 
 # Operation enum for events and tracking
 class Operation(Enum):
-    OPEN_TROVE = 0
-    CLOSE_TROVE = 1
-    ADJUST_TROVE = 2
-    LIQUIDATE = 3
-    REDEEM_COLLATERAL = 4
-    JOIN_BATCH = 5
-    EXIT_BATCH = 6
+    """
+    Represents user operations that can be performed on troves.
+    
+    These operations correspond to the main functions users can call to interact
+    with their troves. The protocol emits events with these operation types
+    to provide transparency and facilitate off-chain tracking.
+    """
+    OPEN_TROVE = 0         # Create a new trove with initial collateral and debt
+    CLOSE_TROVE = 1        # Close a trove by repaying all debt
+    ADJUST_TROVE = 2       # Modify a trove's collateral or debt
+    LIQUIDATE = 3          # Liquidate an undercollateralized trove
+    REDEEM_COLLATERAL = 4  # Redeem BOLD tokens for collateral
+    JOIN_BATCH = 5         # Add a trove to a batch for interest management
+    EXIT_BATCH = 6         # Remove a trove from a batch
 
 # Batch operation enum for events
 class BatchOperation(Enum):
-    CREATE_BATCH = 0
-    ADJUST_BATCH = 1
-    TROVE_CHANGE = 2
-    JOIN_BATCH = 3
-    EXIT_BATCH = 4
+    """
+    Represents operations related to batches of troves.
+    
+    Batches allow multiple troves to be managed together under a common
+    interest rate and management fee. These operations track how batches
+    and their member troves change over time.
+    """
+    CREATE_BATCH = 0  # Create a new batch managed by a specific address
+    ADJUST_BATCH = 1  # Change batch parameters like interest rate
+    TROVE_CHANGE = 2  # Track changes to troves within a batch
+    JOIN_BATCH = 3    # A trove joins an existing batch
+    EXIT_BATCH = 4    # A trove exits from its current batch
 
 @dataclass
 class Trove:
-    """Represents a single trove in the system."""
-    id: int
-    debt: float = 0
-    coll: float = 0
-    stake: float = 0
-    status: Status = Status.NON_EXISTENT
-    array_index: int = 0
-    last_debt_update_time: int = 0
-    last_interest_rate_adj_time: int = 0
-    annual_interest_rate: float = 0
-    interest_batch_manager: Optional[str] = None
-    batch_debt_shares: float = 0
+    """
+    Represents a single trove (borrower position) in the Bold Protocol.
+    
+    A trove is the fundamental unit of the system, where users deposit collateral
+    and borrow BOLD. Each trove has its own debt, collateral, interest rate,
+    and can optionally be part of a batch.
+    
+    Users interact with their troves to adjust their collateral and debt positions,
+    while the system monitors troves to ensure they maintain minimum collateralization.
+    """
+    id: int                 # Unique identifier for the trove
+    debt: float = 0         # Current BOLD debt owed by the trove
+    coll: float = 0         # Current collateral amount in the trove
+    stake: float = 0        # Stake for redistribution calculations
+    status: Status = Status.NON_EXISTENT  # Current status of the trove
+    array_index: int = 0    # Position in the sorted troves list
+    last_debt_update_time: int = 0        # Timestamp of last debt update
+    last_interest_rate_adj_time: int = 0  # Timestamp of last interest rate change
+    annual_interest_rate: float = 0       # Current annual interest rate
+    interest_batch_manager: Optional[str] = None  # Address of batch manager, if in batch
+    batch_debt_shares: float = 0          # Share of the batch debt owned by this trove
 
 @dataclass
 class Batch:
-    """Represents an interest batch that manages multiple troves."""
-    manager: str
-    debt: float = 0
-    coll: float = 0
-    array_index: int = 0
-    last_debt_update_time: int = 0
-    last_interest_rate_adj_time: int = 0
-    annual_interest_rate: float = 0
-    annual_management_fee: float = 0
-    total_debt_shares: float = 0
+    """
+    Represents an interest batch that manages multiple troves together.
+    
+    Batches are a key innovation in the Bold Protocol that allow:
+    1. Collective management of multiple troves under a unified interest rate
+    2. More efficient interest calculation and accrual
+    3. Management fees to be collected by batch managers
+    4. Lower gas costs for interest calculations
+    
+    Troves can join and exit batches, with the batch manager earning a fee on
+    the interest generated by troves in their batch.
+    """
+    manager: str            # Address of the batch manager
+    debt: float = 0         # Total BOLD debt in the batch
+    coll: float = 0         # Total collateral in the batch
+    array_index: int = 0    # Position in sorted batches list
+    last_debt_update_time: int = 0        # Timestamp of last debt update
+    last_interest_rate_adj_time: int = 0  # Timestamp of last interest rate change
+    annual_interest_rate: float = 0       # Current annual interest rate for all troves
+    annual_management_fee: float = 0      # Fee percentage earned by batch manager
+    total_debt_shares: float = 0          # Sum of debt shares for all troves in batch
 
 @dataclass
 class RewardSnapshot:
-    """Snapshot of a trove's rewards at the time of the last update."""
-    coll: float = 0
-    bold_debt: float = 0
+    """
+    Snapshot of a trove's rewards at the time of the last update.
+    
+    These snapshots are critical for the redistribution mechanism, which spreads
+    liquidated debt and collateral to all active troves in the system. Each snapshot
+    records the global L_coll and L_boldDebt values at the time of the trove's
+    last update, so future redistribution gains can be calculated correctly.
+    """
+    coll: float = 0      # Value of L_coll at the time of snapshot
+    bold_debt: float = 0  # Value of L_boldDebt at the time of snapshot
 
 @dataclass
 class LatestTroveData:
-    """Current state of a trove including pending redistributions and interest."""
-    redist_bold_debt_gain: float = 0
-    redist_coll_gain: float = 0
-    recorded_debt: float = 0
-    annual_interest_rate: float = 0
-    weighted_recorded_debt: float = 0
-    accrued_interest: float = 0
-    accrued_batch_management_fee: float = 0
-    entire_debt: float = 0
-    entire_coll: float = 0
-    last_interest_rate_adj_time: int = 0
+    """
+    Current state of a trove including pending redistributions and interest.
+    
+    This container holds the calculated current state of a trove after accounting
+    for all accumulated changes since its last update, including:
+    1. Redistribution gains from liquidations
+    2. Accrued interest based on time elapsed
+    3. Batch management fees if applicable
+    
+    This structure is used extensively during liquidations and redemptions to
+    ensure all operations use the most up-to-date trove state.
+    """
+    redist_bold_debt_gain: float = 0  # Debt gain from redistribution mechanism
+    redist_coll_gain: float = 0       # Collateral gain from redistribution
+    recorded_debt: float = 0          # Debt as recorded in the trove's state
+    annual_interest_rate: float = 0   # Current interest rate for the trove
+    weighted_recorded_debt: float = 0 # Debt * interest rate for interest calculation
+    accrued_interest: float = 0       # Interest accumulated since last update
+    accrued_batch_management_fee: float = 0  # Management fee if in a batch
+    entire_debt: float = 0            # Total debt including all components
+    entire_coll: float = 0            # Total collateral including redistribution
+    last_interest_rate_adj_time: int = 0  # When interest rate was last modified
 
 @dataclass
 class LatestBatchData:
-    """Current state of a batch including interest and management fees."""
-    recorded_debt: float = 0
-    annual_interest_rate: float = 0
-    annual_management_fee: float = 0
-    weighted_recorded_debt: float = 0
-    weighted_recorded_batch_management_fee: float = 0
-    accured_interest: float = 0
-    accured_management_fee: float = 0
-    entire_debt_without_redistribution: float = 0
-    entire_coll_without_redistribution: float = 0
-    last_interest_rate_adj_time: int = 0
+    """
+    Current state of a batch including interest and management fees.
+    
+    Similar to LatestTroveData, this structure holds the calculated current
+    state of a batch after accounting for accrued interest and management fees.
+    It's used when processing operations on troves that belong to batches
+    to ensure correct accounting and fair distribution of interest.
+    """
+    recorded_debt: float = 0          # Debt as recorded in the batch's state
+    annual_interest_rate: float = 0   # Current interest rate for all troves in batch
+    annual_management_fee: float = 0  # Fee percentage for the batch manager
+    weighted_recorded_debt: float = 0 # Debt * interest rate for interest calculation
+    weighted_recorded_batch_management_fee: float = 0 # For management fee calculation
+    accured_interest: float = 0       # Interest accumulated since last batch update
+    accured_management_fee: float = 0 # Management fee accumulated since last update
+    entire_debt_without_redistribution: float = 0  # Total batch debt + interest
+    entire_coll_without_redistribution: float = 0  # Total batch collateral
+    last_interest_rate_adj_time: int = 0  # When batch interest rate was last modified
 
 @dataclass
 class TroveChange:
-    """Represents changes to a trove for accounting purposes."""
-    coll_increase: float = 0
-    coll_decrease: float = 0
-    debt_increase: float = 0
-    debt_decrease: float = 0
-    upfront_fee: float = 0
-    applied_redist_coll_gain: float = 0
-    applied_redist_bold_debt_gain: float = 0
-    batch_accrued_management_fee: float = 0
-    old_weighted_recorded_debt: float = 0
-    new_weighted_recorded_debt: float = 0
-    old_weighted_recorded_batch_management_fee: float = 0
-    new_weighted_recorded_batch_management_fee: float = 0
+    """
+    Represents changes to a trove for accounting purposes.
+    
+    This structure tracks all changes to a trove's state during an operation,
+    making it easier to update all connected components (like pools) correctly.
+    It's a comprehensive record of how a trove's debt and collateral have
+    changed, which is critical for maintaining the system's overall accounting.
+    """
+    coll_increase: float = 0          # Amount of collateral added
+    coll_decrease: float = 0          # Amount of collateral removed
+    debt_increase: float = 0          # Amount of debt added
+    debt_decrease: float = 0          # Amount of debt paid back
+    upfront_fee: float = 0            # Fee charged during trove operations
+    applied_redist_coll_gain: float = 0  # Redistribution collateral being claimed
+    applied_redist_bold_debt_gain: float = 0 # Redistribution debt being applied
+    batch_accrued_management_fee: float = 0  # Management fee if in batch
+    old_weighted_recorded_debt: float = 0    # Previous value for interest calculation
+    new_weighted_recorded_debt: float = 0    # New value for interest calculation
+    old_weighted_recorded_batch_management_fee: float = 0  # For management fee accounting
+    new_weighted_recorded_batch_management_fee: float = 0  # Updated management fee value
 
 @dataclass
 class LiquidationValues:
-    """Values calculated during liquidation."""
-    coll_gas_compensation: float = 0
-    debt_to_offset: float = 0
-    coll_to_send_to_sp: float = 0
-    debt_to_redistribute: float = 0
-    coll_to_redistribute: float = 0
-    coll_surplus: float = 0
-    eth_gas_compensation: float = 0
-    old_weighted_recorded_debt: float = 0
-    new_weighted_recorded_debt: float = 0
+    """
+    Values calculated during the liquidation of a trove.
+    
+    When a trove is liquidated for being undercollateralized, its debt and
+    collateral are processed in a specific way. This class tracks all the
+    components of that process, including:
+    1. Gas compensation for the liquidator
+    2. Portions of debt offset using Stability Pool
+    3. Portions of debt and collateral redistributed to other troves
+    4. Any collateral surplus returned to the trove owner
+    
+    These detailed calculations ensure proper accounting and fair treatment
+    of all parties involved in a liquidation.
+    """
+    coll_gas_compensation: float = 0   # Collateral reserved for liquidation gas costs
+    debt_to_offset: float = 0          # Debt to be offset using Stability Pool
+    coll_to_send_to_sp: float = 0      # Collateral sent to SP depositors as reward
+    debt_to_redistribute: float = 0    # Debt to be spread among other troves
+    coll_to_redistribute: float = 0    # Collateral to be spread among other troves
+    coll_surplus: float = 0            # Excess collateral returned to trove owner
+    eth_gas_compensation: float = 0    # Fixed ETH compensation for liquidator
+    old_weighted_recorded_debt: float = 0  # For interest calculation
+    new_weighted_recorded_debt: float = 0  # Updated interest calculation value
 
 @dataclass
 class SingleRedemptionValues:
-    """Values calculated during a single redemption."""
-    trove_id: int = 0
-    batch_address: Optional[str] = None
-    bold_lot: float = 0
-    coll_lot: float = 0
-    coll_fee: float = 0
-    applied_redist_bold_debt_gain: float = 0
-    old_weighted_recorded_debt: float = 0
-    new_weighted_recorded_debt: float = 0
-    new_stake: float = 0
-    is_zombie_trove: bool = False
-    trove: LatestTroveData = field(default_factory=LatestTroveData)
-    batch: LatestBatchData = field(default_factory=LatestBatchData)
+    """
+    Values calculated during a single BOLD redemption for collateral.
+    
+    Redemption is a key mechanism allowing BOLD holders to exchange their tokens
+    for collateral at face value (minus fees). This structure tracks all the
+    details of a redemption from a single trove, including:
+    1. The amount of BOLD being redeemed (bold_lot)
+    2. The amount of collateral being drawn (coll_lot)
+    3. The redemption fee being charged
+    4. How the trove's state changes after redemption
+    
+    Redemptions process troves in order of interest rate (lowest first) to ensure
+    fairness and predictability for borrowers.
+    """
+    trove_id: int = 0                  # ID of the trove being redeemed from
+    batch_address: Optional[str] = None  # Batch address if trove is in a batch
+    bold_lot: float = 0                # Amount of BOLD being redeemed
+    coll_lot: float = 0                # Amount of collateral being retrieved
+    coll_fee: float = 0                # Redemption fee in collateral
+    applied_redist_bold_debt_gain: float = 0  # Redistribution being applied
+    old_weighted_recorded_debt: float = 0     # For interest calculation
+    new_weighted_recorded_debt: float = 0     # Updated interest calculation value
+    new_stake: float = 0               # Updated stake after redemption
+    is_zombie_trove: bool = False      # Whether trove is in zombie state
+    trove: LatestTroveData = field(default_factory=LatestTroveData)  # Current trove state
+    batch: LatestBatchData = field(default_factory=LatestBatchData)  # Batch state if applicable
 
 class TroveManager:
     """
     Simulates the TroveManager contract which handles trove operations.
+    
+    The TroveManager is the core operational component of the Bold Protocol, responsible for:
+    
+    1. Collateral Management:
+       - Tracking all deposited collateral
+       - Managing collateralization ratios and requirements
+       - Enforcing minimum collateral requirements
+    
+    2. Debt Management:
+       - Tracking all outstanding BOLD debt
+       - Applying interest based on time and rates
+       - Managing minimum debt requirements
+    
+    3. Liquidation Mechanism:
+       - Identifying undercollateralized troves
+       - Processing liquidations through the Stability Pool
+       - Redistributing debt and collateral when needed
+    
+    4. Redemption Mechanism:
+       - Allowing BOLD holders to exchange tokens for collateral
+       - Calculating and applying redemption fees
+       - Ensuring fair processing order based on interest rates
+    
+    5. Batch Management:
+       - Tracking batches of troves with shared parameters
+       - Applying interest and management fees to batches
+       - Managing trove membership in batches
+    
+    The TroveManager interacts with several other components including:
+    - ActivePool: Holds active collateral and debt
+    - StabilityPool: Holds BOLD deposits for liquidations
+    - DefaultPool: Holds redistributed collateral and debt
+    - CollSurplusPool: Holds excess collateral from liquidations
     """
     
     def __init__(self, active_pool=None, stability_pool=None, default_pool=None, 
@@ -231,13 +376,32 @@ class TroveManager:
     
     def liquidate(self, trove_id):
         """
-        Liquidates a single trove.
+        Liquidates a single undercollateralized trove.
+        
+        Liquidation is a critical stability mechanism in the Bold Protocol that
+        removes risky positions before they can become undercollateralized. When
+        a trove's collateralization ratio falls below the MCR (110%), anyone can
+        call this function to liquidate it.
+        
+        The liquidation process follows these steps:
+        1. Check if the trove is eligible for liquidation (ICR < MCR)
+        2. Calculate gas compensation for the liquidator
+        3. Attempt to offset the trove's debt using the Stability Pool
+        4. Redistribute any remaining debt and collateral to other troves
+        5. Send any collateral surplus to the CollSurplusPool for the owner to claim
+        6. Close the trove and update system accounting
+        
+        Liquidators are incentivized with gas compensation and potentially favorable
+        collateral acquisition through the Stability Pool mechanism.
         
         Args:
             trove_id: ID of the trove to liquidate
         
         Returns:
-            LiquidationValues with the results
+            LiquidationValues with the detailed results of the liquidation
+            
+        Raises:
+            ValueError: If the system is shut down or the trove isn't eligible for liquidation
         """
         # Check if the system is shut down
         if self.shutdown_time != 0:
@@ -298,13 +462,31 @@ class TroveManager:
     
     def batch_liquidate_troves(self, trove_array):
         """
-        Liquidates multiple troves in a batch.
+        Liquidates multiple troves in a batch for gas efficiency.
+        
+        This function allows liquidators to process multiple troves in a single
+        transaction, which is both gas-efficient and helps maintain system health
+        during market downturns when many troves might become undercollateralized
+        simultaneously.
+        
+        The batch liquidation process:
+        1. Checks each trove in the array for eligibility (ICR < MCR)
+        2. Liquidates eligible troves following the same process as individual liquidation
+        3. Tracks and accumulates results across all liquidations
+        4. Applies the combined effects to all system pools at once
+        
+        This is particularly useful during market volatility when rapid price
+        changes might affect many troves. It allows the system to maintain
+        its health by efficiently removing risky positions.
         
         Args:
             trove_array: Array of trove IDs to attempt to liquidate
         
         Returns:
-            LiquidationValues with the combined results
+            LiquidationValues with the combined results of all liquidations
+            
+        Raises:
+            ValueError: If no troves were eligible for liquidation
         """
         if not trove_array:
             raise ValueError("Empty trove array")
@@ -674,15 +856,35 @@ class TroveManager:
     
     def redeem_collateral(self, redeemer, bold_amount, max_iterations=0):
         """
-        Redeems collateral in exchange for BOLD.
+        Redeems BOLD tokens for underlying collateral from troves.
+        
+        Redemption is a fundamental mechanism that allows BOLD holders to exchange
+        their tokens for collateral at face value (minus a fee). This helps maintain
+        the value of BOLD by providing a price floor and a way to exit the system.
+        
+        The redemption process works as follows:
+        1. BOLD holder specifies how much BOLD they want to redeem
+        2. System processes troves in order of interest rate (lowest first)
+        3. BOLD is exchanged for collateral at current price
+        4. A variable redemption fee is charged on the collateral
+        5. The redeemed BOLD is burned, reducing supply
+        
+        Troves with ICR < 100% are skipped during redemption to avoid reducing
+        their collateralization ratio further. This protects the system's stability.
+        
+        Redemptions are particularly attractive during market downturns when
+        BOLD might trade below its target value, as they provide arbitrage opportunities.
         
         Args:
-            redeemer: Address of the redeemer
-            bold_amount: Amount of BOLD to redeem
+            redeemer: Address of the BOLD holder redeeming tokens
+            bold_amount: Amount of BOLD tokens to redeem
             max_iterations: Maximum number of troves to process (0 for unlimited)
             
         Returns:
             Tuple of (redeemed_amount, total_coll_fee, total_coll_drawn)
+            
+        Raises:
+            ValueError: If system is shut down or redemption conditions aren't met
         """
         if self.shutdown_time != 0:
             raise ValueError("System is shut down")
@@ -968,16 +1170,35 @@ class TroveManager:
     
     def urgent_redemption(self, redeemer, bold_amount, trove_ids, min_collateral):
         """
-        Performs urgent redemption when system is shut down.
+        Performs urgent redemption when the system is in shutdown mode.
+        
+        System shutdown is an emergency safety mechanism activated when extreme
+        market conditions threaten the stability of the protocol. During shutdown,
+        normal operations are paused, but users can still:
+        1. Close their troves by repaying debt
+        2. Perform urgent redemptions to recover their collateral
+        
+        Urgent redemption differs from regular redemption in several ways:
+        1. Redeemers can specify which troves to redeem from
+        2. A redemption bonus is applied (currently 1%)
+        3. ICR checks are bypassed to ensure all redemptions can succeed
+        4. Minimum collateral requirements can be specified
+        
+        This process ensures that even during a system emergency, BOLD holders
+        can exit the system and recover their underlying collateral, maintaining
+        trust in the protocol's ability to honor its obligations.
         
         Args:
-            redeemer: Address of the redeemer
+            redeemer: Address of the BOLD holder redeeming tokens
             bold_amount: Amount of BOLD to redeem
             trove_ids: Array of trove IDs to redeem from
             min_collateral: Minimum collateral to receive
             
         Returns:
             Tuple of (redeemed_amount, total_coll_drawn)
+            
+        Raises:
+            ValueError: If system is not in shutdown mode or redemption conditions aren't met
         """
         if self.shutdown_time == 0:
             raise ValueError("System is not shut down")
@@ -1095,6 +1316,22 @@ class TroveManager:
         """
         Shuts down the system, preventing new borrowing operations.
         
+        System shutdown is a critical emergency mechanism designed to protect
+        the protocol in extreme circumstances, such as:
+        1. Severe market crashes that threaten system solvency
+        2. Discovery of critical vulnerabilities
+        3. Regulatory actions requiring cessation of operations
+        
+        When shutdown is triggered:
+        1. No new troves can be opened
+        2. No existing troves can increase their debt
+        3. Regular redemptions are blocked
+        4. Only urgent redemptions and trove closures are allowed
+        5. Interest accrual stops at the shutdown timestamp
+        
+        This creates an orderly wind-down process that prioritizes system stability
+        and ensures all users can eventually exit their positions.
+        
         Returns:
             None
         """
@@ -1110,9 +1347,25 @@ class TroveManager:
         """
         Calculates the current ICR (Individual Collateral Ratio) of a trove.
         
+        The ICR is the most important health metric for a trove, calculated as:
+        
+            ICR = (collateral * price) / debt
+        
+        This ratio determines:
+        1. Whether a trove can be created or modified (must be >= MCR, which is 110%)
+        2. Whether a trove is eligible for liquidation (if ICR < MCR)
+        3. The order of troves for redemption (prioritizing higher ICR troves)
+        4. Whether a trove can join a batch (usually requires higher ICR than MCR)
+        
+        This function accounts for all components of a trove's state:
+        - Direct collateral and debt
+        - Redistribution gains
+        - Accrued interest
+        - Batch management fees if applicable
+        
         Args:
             trove_id: ID of the trove
-            price: Current price of collateral
+            price: Current price of collateral in USD
             
         Returns:
             ICR as a decimal (e.g., 1.5 for 150%)

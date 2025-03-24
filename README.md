@@ -53,13 +53,13 @@ pip install -r requirements.txt
 
 ```bash
 # Run the simple simulation
-python -m sim.simple_simulation
+python -m model.sim.simple_simulation
 
 # Run the full simulation with different scenarios
-python -m sim.simulation_example
+python -m model.sim.simulation_example
 
-# Run the visualization simulation
-python -m sim.visualization_simulation
+# Run the visualization simulation (requires matplotlib)
+python -m model.sim.visualization_simulation
 ```
 
 3. Import the model in your own scripts:
@@ -92,7 +92,11 @@ results = model.simulate_market_scenario(days=30, price_volatility=0.03, plot_re
 4. Run tests:
 
 ```bash
-python -m unittest test.test_vault_model
+# Run all tests in the test_vault_model module
+python -m unittest model.test.test_vault_model
+
+# Run a specific test
+python -m unittest model.test.test_vault_model.TestBoldProtocol.test_batch_management
 ```
 
 ## Key Model Features
@@ -118,6 +122,10 @@ This model is a simplified version of the full Bold Protocol and has several lim
 - Limited multi-collateral support (focused on ETH)
 - No external integrations with DeFi protocols
 - Simplified sorting of troves by interest rate
+
+## Test Results
+
+When running the tests, you might occasionally see a failure in the `test_market_simulation` test. This is expected as the test depends on random price movements in the simulation, making it somewhat flaky. All other tests should pass consistently.
 
 ## License
 
